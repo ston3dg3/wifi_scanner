@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include "network.h"
+#include "battery.h"
 
 // Common interface implemented by exactly one of oled.cpp / tft.cpp,
 // chosen via USE_TFT_DISPLAY in display_config.h. Callers don't need to
@@ -18,4 +19,5 @@ void screenInit();
 void screenRenderNextPage(const NetworkInfo networks[], int networkCount,
                            const DeviceAssociation associations[], int associationCount,
                            const AlertEvent alerts[], int alertCount,
-                           unsigned long totalAlertCount, unsigned long uptimeMs);
+                           unsigned long totalAlertCount, unsigned long uptimeMs,
+                           const BatteryStatus &battery);

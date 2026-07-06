@@ -13,7 +13,8 @@ static String sanitize(const String &in) {
 void sendStateOverSerial(const NetworkInfo networks[], int networkCount,
                           const DeviceAssociation associations[], int associationCount,
                           const AlertEvent alerts[], int alertCount,
-                          unsigned long totalAlertCount, unsigned long uptimeMs) {
+                          unsigned long totalAlertCount, unsigned long uptimeMs,
+                          const BatteryStatus &battery) {
   Serial.println("BEGIN");
 
   for (int i = 0; i < networkCount; i++) {
@@ -34,6 +35,9 @@ void sendStateOverSerial(const NetworkInfo networks[], int networkCount,
                   alerts[i].kind.c_str(), alerts[i].mac1.c_str(), alerts[i].mac2.c_str(),
                   (uptimeMs - alerts[i].timestampMs) / 1000);
   }
+
+  Serial.printf("BATT|%.2f|%.1f|%d|%d\n", battery.voltageV, battery.currentMA,
+                battery.percent, battery.sensorReady ? 1 : 0);
 
   Serial.printf("END|%lu|%lu\n", uptimeMs / 1000, totalAlertCount);
 }

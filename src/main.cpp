@@ -2,6 +2,7 @@
 #include "network.h"
 #include "protocol.h"
 #include "screen.h"
+#include "battery.h"
 
 #define LED D4 // Onboard LED, GPIO2 on NodeMCU v3
 #define SEND_INTERVAL_MS 3000
@@ -32,6 +33,7 @@ void setup() {
   Serial.begin(9600);
   networkInit(); // station mode + always-on passive frame sniffer
   screenInit();
+  batteryInit();
   Serial.println("WiFi Analyzer booting...");
   Serial.println("Commands: 'beacon' = broadcast fake AP for 5s");
 }
@@ -47,11 +49,12 @@ void loop() {
   int networkCount = getNetworks(networks, MAX_NETWORKS);
   int associationCount = getAssociations(associations, MAX_ASSOCIATIONS);
   int alertCount = getRecentAlerts(alerts, MAX_ALERTS);
+  BatteryStatus battery = batteryRead();
 
   sendStateOverSerial(networks, networkCount, associations, associationCount,
-                       alerts, alertCount, getTotalAlertCount(), millis());
+                       alerts, alertCount, getTotalAlertCount(), millis(), battery);
   screenRenderNextPage(networks, networkCount, associations, associationCount,
-                        alerts, alertCount, getTotalAlertCount(), millis());
+                        alerts, alertCount, getTotalAlertCount(), millis(), battery);
 
   ledOn = !ledOn;
   digitalWrite(LED, ledOn ? LOW : HIGH); // active-LOW heartbeat blink

@@ -9,6 +9,7 @@ Serial protocol (one line each, pipe-delimited):
     NET|channel|ssid|rssi|secured(0/1)|bssid
     ASSOC|deviceMac|ssid|bssid|lastSeenSecondsAgo
     ALERT|kind|mac1|mac2|ageSecondsAgo
+    BATT|voltageV|currentMA|percent|sensorReady(0/1)
     END|uptimeSeconds|totalAlertCount
 Any other line is treated as plain log text.
 """
@@ -88,6 +89,7 @@ class WifiAnalyzerApp(ctk.CTk):
         self._pending_networks = []
         self._pending_associations = []
         self._pending_alerts = []
+        self._pending_battery = None
         self._current_networks = []  # parsed dicts, kept for canvas redraws on resize
 
         self._build_ui()
@@ -124,6 +126,9 @@ class WifiAnalyzerApp(ctk.CTk):
 
         self.uptime_label = ctk.CTkLabel(top, text="", text_color=COLOR_TEXT_DIM, font=FONT_MONO)
         self.uptime_label.pack(side="right", padx=10)
+
+        self.battery_label = ctk.CTkLabel(top, text="", text_color=COLOR_TEXT_DIM, font=FONT_MONO_BOLD)
+        self.battery_label.pack(side="right", padx=10)
 
         self.tabview = ctk.CTkTabview(self, fg_color=COLOR_PANEL_BG,
                                        segmented_button_selected_color=COLOR_BLUE,
@@ -253,6 +258,7 @@ class WifiAnalyzerApp(ctk.CTk):
             self._pending_networks = []
             self._pending_associations = []
             self._pending_alerts = []
+            self._pending_battery = None
             return
 
         if line.startswith("END|"):
@@ -277,6 +283,12 @@ class WifiAnalyzerApp(ctk.CTk):
             parts = line.split("|")
             if len(parts) == 5:
                 self._pending_alerts.append(parts[1:])
+            return
+
+        if line.startswith("BATT|"):
+            parts = line.split("|")
+            if len(parts) == 5:
+                self._pending_battery = parts[1:]
             return
 
         # boot messages, "beacon" command feedback, or any unrecognized line
@@ -307,6 +319,17 @@ class WifiAnalyzerApp(ctk.CTk):
         mins, secs = divmod(rem, 60)
         self.uptime_label.configure(
             text=f"Uptime {hrs:02d}:{mins:02d}:{secs:02d}   Total alerts: {total_alerts}")
+
+        if self._pending_battery:
+            voltage, current_ma, percent, sensor_ready = self._pending_battery
+            if sensor_ready == "1":
+                percent = int(percent)
+                color = COLOR_RED if percent <= 15 else COLOR_GREEN
+                self.battery_label.configure(
+                    text=f"\U0001F50B {percent}%  {float(voltage):.2f}V  {float(current_ma):.0f}mA",
+                    text_color=color)
+            else:
+                self.battery_label.configure(text="\U0001F50B not detected", text_color=COLOR_TEXT_DIM)
 
     # ------------------------------------------------------------------
     # Networks canvas: RSSI (y) vs channel (x) scatter with compact cards

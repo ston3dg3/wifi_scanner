@@ -28,27 +28,40 @@ static String truncated(const String &s, uint8_t maxLen) {
   return s.substring(0, maxLen - 1) + ".";
 }
 
-static void drawHeader(const char *title) {
+static void drawHeader(const char *title, const BatteryStatus &battery) {
   display.setTextSize(1);
   display.setCursor(0, 0);
   display.print(title);
+
+  if (battery.sensorReady) {
+    char buf[8];
+    snprintf(buf, sizeof(buf), "%3d%%", battery.percent);
+    int textWidth = strlen(buf) * 6; // 6px/char at text size 1
+    display.setCursor(SCREEN_WIDTH - textWidth, 0);
+    display.print(buf);
+  }
+
   // Body text starts exactly at the panel's color seam so no line of text
   // ever gets split across the yellow/blue boundary.
   display.setCursor(0, COLOR_SEAM_Y);
 }
 
 static void renderOverview(int networkCount, int associationCount,
-                            unsigned long totalAlertCount, unsigned long uptimeMs) {
-  drawHeader("Overview");
+                            unsigned long totalAlertCount, unsigned long uptimeMs,
+                            const BatteryStatus &battery) {
+  drawHeader("Overview", battery);
   unsigned long sec = uptimeMs / 1000;
   display.printf("Up: %02lu:%02lu:%02lu\n", sec / 3600, (sec / 60) % 60, sec % 60);
   display.printf("Networks: %d\n", networkCount);
   display.printf("Devices:  %d\n", associationCount);
   display.printf("Alerts:   %lu total\n", totalAlertCount);
+  if (battery.sensorReady) {
+    display.printf("Batt: %.2fV %.0fmA\n", battery.voltageV, battery.currentMA);
+  }
 }
 
-static void renderNetworks(const NetworkInfo networks[], int count) {
-  drawHeader("Top Networks");
+static void renderNetworks(const NetworkInfo networks[], int count, const BatteryStatus &battery) {
+  drawHeader("Top Networks", battery);
   if (count == 0) {
     display.println("(none seen yet)");
     return;
@@ -75,8 +88,8 @@ static void renderNetworks(const NetworkInfo networks[], int count) {
   }
 }
 
-static void renderAlerts(const AlertEvent alerts[], int count) {
-  drawHeader("Recent Alerts");
+static void renderAlerts(const AlertEvent alerts[], int count, const BatteryStatus &battery) {
+  drawHeader("Recent Alerts", battery);
   if (count == 0) {
     display.println("(none)");
     return;
@@ -87,8 +100,8 @@ static void renderAlerts(const AlertEvent alerts[], int count) {
   }
 }
 
-static void renderDevices(const DeviceAssociation associations[], int count) {
-  drawHeader("Joined Devices");
+static void renderDevices(const DeviceAssociation associations[], int count, const BatteryStatus &battery) {
+  drawHeader("Joined Devices", battery);
   if (count == 0) {
     display.println("(none seen yet)");
     return;
@@ -116,15 +129,16 @@ void screenInit() {
 void screenRenderNextPage(const NetworkInfo networks[], int networkCount,
                            const DeviceAssociation associations[], int associationCount,
                            const AlertEvent alerts[], int alertCount,
-                           unsigned long totalAlertCount, unsigned long uptimeMs) {
+                           unsigned long totalAlertCount, unsigned long uptimeMs,
+                           const BatteryStatus &battery) {
   if (!oledReady) return;
 
   display.clearDisplay();
   switch (currentPage) {
-    case 0: renderOverview(networkCount, associationCount, totalAlertCount, uptimeMs); break;
-    case 1: renderNetworks(networks, networkCount); break;
-    case 2: renderAlerts(alerts, alertCount); break;
-    case 3: renderDevices(associations, associationCount); break;
+    case 0: renderOverview(networkCount, associationCount, totalAlertCount, uptimeMs, battery); break;
+    case 1: renderNetworks(networks, networkCount, battery); break;
+    case 2: renderAlerts(alerts, alertCount, battery); break;
+    case 3: renderDevices(associations, associationCount, battery); break;
   }
   display.display();
 

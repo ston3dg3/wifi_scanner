@@ -159,7 +159,8 @@ static void refreshChannelColumn(int ch, const NetworkInfo networks[], int count
 }
 
 static void updateStatusBar(int networkCount, int associationCount,
-                             unsigned long totalAlertCount, unsigned long uptimeMs) {
+                             unsigned long totalAlertCount, unsigned long uptimeMs,
+                             const BatteryStatus &battery) {
   display.fillRect(0, 0, display.width(), STATUS_BAR_H - 1, ST77XX_BLACK);
   unsigned long sec = uptimeMs / 1000;
   display.setTextSize(1);
@@ -168,6 +169,15 @@ static void updateStatusBar(int networkCount, int associationCount,
   display.printf("Nets:%-3d Assoc:%-3d Alerts:%-4lu  %02lu:%02lu:%02lu",
                   networkCount, associationCount, totalAlertCount,
                   sec / 3600, (sec / 60) % 60, sec % 60);
+
+  if (battery.sensorReady) {
+    char buf[20];
+    snprintf(buf, sizeof(buf), "Batt:%d%% %.2fV", battery.percent, battery.voltageV);
+    int textWidth = strlen(buf) * 6; // 6px/char at text size 1
+    display.setTextColor(battery.percent <= 15 ? ST77XX_RED : ST77XX_YELLOW);
+    display.setCursor(display.width() - textWidth - 2, 2);
+    display.print(buf);
+  }
 }
 
 // Bottom banner: flashes the most recent deauth/disassoc/reauth for as
@@ -236,7 +246,8 @@ void screenInit() {
 void screenRenderNextPage(const NetworkInfo networks[], int networkCount,
                            const DeviceAssociation associations[], int associationCount,
                            const AlertEvent alerts[], int alertCount,
-                           unsigned long totalAlertCount, unsigned long uptimeMs) {
+                           unsigned long totalAlertCount, unsigned long uptimeMs,
+                           const BatteryStatus &battery) {
   if (!tftReady) return;
 
   int freshest = findFreshestAssociation(associations, associationCount);
@@ -255,7 +266,7 @@ void screenRenderNextPage(const NetworkInfo networks[], int networkCount,
     refreshChannelColumn(ch, networks, networkCount);
   }
 
-  updateStatusBar(networkCount, associationCount, totalAlertCount, uptimeMs);
+  updateStatusBar(networkCount, associationCount, totalAlertCount, uptimeMs, battery);
   updateAlertBanner(alerts, alertCount, uptimeMs);
 
   if (showToast) drawJoinToast(associations[freshest].ssid);
