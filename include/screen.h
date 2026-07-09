@@ -13,11 +13,15 @@
 // than blocking on missing hardware.
 void screenInit();
 
-// Renders one page of a rotating summary (overview, top networks, recent
-// alerts, recent device joins) and advances to the next page for next
-// time. Call periodically, e.g. alongside sendStateOverSerial().
-void screenRenderNextPage(const NetworkInfo networks[], int networkCount,
-                           const DeviceAssociation associations[], int associationCount,
-                           const AlertEvent alerts[], int alertCount,
-                           unsigned long totalAlertCount, unsigned long uptimeMs,
-                           const BatteryStatus &battery);
+// Renders the current screen from a fresh data snapshot. Call
+// periodically, e.g. alongside sendStateOverSerial(). Neither backend has
+// touch/button input (the TFT panel's touch controller turned out to be
+// unpopulated - see docs/wiring.md), so the TFT backend also rotates
+// between screens on a timer as part of this call; the OLED backend
+// rotates between its pages the same way it always has.
+void screenRender(const NetworkInfo networks[], int networkCount,
+                   const DeviceAssociation associations[], int associationCount,
+                   const AlertEvent alerts[], int alertCount,
+                   const PacketEvent packets[], int packetCount,
+                   unsigned long totalAlertCount, unsigned long uptimeMs,
+                   const BatteryStatus &battery);

@@ -20,7 +20,7 @@ void sendStateOverSerial(const NetworkInfo networks[], int networkCount,
   for (int i = 0; i < networkCount; i++) {
     Serial.printf("NET|%u|%s|%ld|%d|%s\n",
                   networks[i].channel, sanitize(networks[i].ssid).c_str(),
-                  (long)networks[i].rssi, networks[i].secured ? 1 : 0,
+                  (long)networks[i].rssi, networks[i].security != SEC_OPEN ? 1 : 0,
                   networks[i].bssid.c_str());
   }
 

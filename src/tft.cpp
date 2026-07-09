@@ -13,46 +13,63 @@
 // Driver choice, pins, and SPI frequency are all set via build_flags in
 // platformio.ini (TFT_eSPI is configured at compile time, not via
 // constructor args) - see the comment block there for the pin mapping.
+// This panel's touch controller turned out to be unpopulated (confirmed
+// by continuity/IRQ probing - see docs/wiring.md), so there's no touch
+// input; screens rotate automatically instead.
 
-#define COLOR_DARKGREY 0x7BEF // matches TFT_DARKGREY, spelled out for clarity
-#define COLOR_NAVY 0x000C     // dim fill for the per-channel occupancy bars
-
-// RSSI range for the channel/signal graph, in dBm.
-#define RSSI_MAX -30 // top of the graph (strong signal)
-#define RSSI_MIN -100 // bottom of the graph (weak signal)
-
-// A join toast / alert banner stays on screen this long after the event,
-// so it survives roughly two SEND_INTERVAL_MS (3s) redraw cycles before
-// fading back out on its own on a later redraw.
-#define TOAST_WINDOW_MS 6000UL
-
-// A channel showing this many networks or more fills its occupancy bar
-// all the way - keeps one very crowded channel from dwarfing the rest.
-#define CHANNEL_BAR_CAP 6
-
-// Persistent-screen layout. The screen is never fully wiped after boot -
-// the grid/labels below are drawn once and each redraw only touches the
-// small region a piece of dynamic content actually lives in, so nothing
-// ever flashes black before repainting (see screenRenderNextPage()).
-#define STATUS_BAR_H 13
-#define BANNER_H 18
-#define MARGIN_LEFT 26
-#define MARGIN_RIGHT 4
-#define MARGIN_TOP (STATUS_BAR_H + 4)
-#define MARGIN_BOTTOM 12
-#define COLUMN_HALF_W 5 // each channel's dynamic content lives in a x-5..x+5 strip
+// --- Dark, modern palette ---------------------------------------------
+static uint16_t COLOR_BG, COLOR_SURFACE, COLOR_BORDER, COLOR_TEXT, COLOR_TEXT_DIM,
+                 COLOR_ACCENT, COLOR_GREEN, COLOR_TEAL, COLOR_AMBER, COLOR_RED;
 
 static TFT_eSPI display = TFT_eSPI();
 static bool tftReady = false;
 
-// Layout, computed once in screenInit() from the panel's actual dimensions.
-static int gPlotW, gPlotH, gBaseline, gGraphBottom;
-static int gChanX[14]; // pixel x for channel 1-13 (index 0 unused)
-static int gRssiRowY[8], gRssiRowVal[8], gRssiRowCount;
-static int gToastX, gToastY, gToastW, gToastH;
+// --- Layout, computed once in layoutInit() from the panel's actual size ---
+static int screenW, screenH;
+static int contentY0, contentY1, contentH;
 
-static bool bannerWasVisible = false;
-static bool toastWasVisible = false;
+#define STATUS_H 22
+#define NAV_H 34
+
+enum ScreenId { SCREEN_GRAPH = 0, SCREEN_LIST = 1, SCREEN_PACKETS = 2, SCREEN_COUNT };
+// To add a screen: bump SCREEN_COUNT above, add its label to TAB_LABELS in
+// drawNavBar(), add a render function, and add a case to renderContent().
+static uint8_t activeScreen = SCREEN_GRAPH;
+
+// Screens rotate automatically - no touch/buttons on this hardware.
+#define ROTATE_INTERVAL_MS 10000UL
+static unsigned long lastRotateMs = 0;
+
+// Graph screen plot geometry
+#define RSSI_MAX -30 // top of the graph (strong signal)
+#define RSSI_MIN -100 // bottom of the graph (weak signal)
+static int plotLeft, plotRight, plotTop, plotBottom;
+static int chanX[14]; // pixel x for channel 1-13 (index 0 unused)
+static int rssiRowY[8], rssiRowVal[8], rssiRowCount;
+
+// List screen geometry
+#define LIST_ROW_H 18
+static int listRowsTop, listPagerY, listPagerH = 18;
+static int rowsPerPage;
+static int colChX, colRssiX, colSecX;
+static int gListPage = 0;
+static int gListTotalPages = 1;
+
+// Packets screen geometry
+#define PACKET_ROW_H 18
+
+// --- Cached snapshot of the last data screenRender() was given ---
+static NetworkInfo gNetworks[MAX_NETWORKS];
+static int gNetworkCount = 0;
+static PacketEvent gPackets[MAX_PACKET_LOG];
+static int gPacketCount = 0;
+static unsigned long gUptimeMs = 0;
+static BatteryStatus gBattery = {0, 0, 0, false};
+static bool gHaveData = false;
+
+static void renderContent();
+static void drawStatusBar();
+static void drawNavBar();
 
 static String truncated(const String &s, uint8_t maxLen) {
   if (s.length() <= maxLen) return s;
@@ -60,229 +77,410 @@ static String truncated(const String &s, uint8_t maxLen) {
 }
 
 // Last 3 octets, e.g. "12:34:56" - enough to distinguish devices in the
-// small toast/banner strips without eating all the horizontal space.
+// packet feed's tight row width without eating all the horizontal space.
 static String shortMac(const String &mac) {
   return mac.length() >= 17 ? mac.substring(9) : mac;
 }
 
-static void layoutInit() {
-  gGraphBottom = display.height() - BANNER_H;
-  gPlotW = display.width() - MARGIN_LEFT - MARGIN_RIGHT;
-  gPlotH = gGraphBottom - MARGIN_BOTTOM - MARGIN_TOP;
-  gBaseline = MARGIN_TOP + gPlotH;
+static uint16_t packetColor(PacketKind k) {
+  switch (k) {
+    case PKT_NEW_NETWORK: return COLOR_ACCENT;
+    case PKT_PROBE:
+    case PKT_AUTH: return COLOR_TEXT_DIM;
+    case PKT_ASSOC:
+    case PKT_REASSOC: return COLOR_GREEN;
+    case PKT_DEAUTH:
+    case PKT_DISASSOC: return COLOR_RED;
+    case PKT_REAUTH: return COLOR_AMBER;
+  }
+  return COLOR_TEXT_DIM;
+}
 
+static uint16_t securityColor(SecurityType s) {
+  switch (s) {
+    case SEC_OPEN: return COLOR_RED;
+    case SEC_WEP:
+    case SEC_WPA: return COLOR_AMBER;
+    case SEC_WPA2:
+    case SEC_SECURED: return COLOR_GREEN;
+    case SEC_WPA3:
+    case SEC_WPA2_WPA3: return COLOR_TEAL;
+  }
+  return COLOR_TEXT_DIM;
+}
+
+static void initPalette() {
+  COLOR_BG       = display.color565(13, 17, 23);
+  COLOR_SURFACE  = display.color565(22, 27, 34);
+  COLOR_BORDER   = display.color565(48, 56, 68);
+  COLOR_TEXT     = display.color565(230, 237, 243);
+  COLOR_TEXT_DIM = display.color565(139, 148, 158);
+  COLOR_ACCENT   = display.color565(56, 189, 189);
+  COLOR_GREEN    = display.color565(63, 185, 80);
+  COLOR_TEAL     = display.color565(45, 212, 191);
+  COLOR_AMBER    = display.color565(230, 160, 50);
+  COLOR_RED      = display.color565(230, 80, 80);
+}
+
+static void layoutInit() {
+  screenW = display.width();
+  screenH = display.height();
+
+  contentY0 = STATUS_H;
+  contentY1 = screenH - NAV_H;
+  contentH = contentY1 - contentY0;
+
+  // Graph plot: left margin for RSSI labels, bottom margin for channel labels.
+  plotLeft = 26;
+  plotRight = screenW - 6;
+  plotTop = contentY0 + 6;
+  plotBottom = contentY1 - 14;
   for (int ch = 1; ch <= 13; ch++) {
     float frac = (float)(ch - 1) / 12;
-    gChanX[ch] = MARGIN_LEFT + (int)(frac * gPlotW);
+    chanX[ch] = plotLeft + (int)(frac * (plotRight - plotLeft));
   }
-
-  gRssiRowCount = 0;
+  rssiRowCount = 0;
   for (int rssi = RSSI_MAX; rssi >= RSSI_MIN; rssi -= 20) {
     float frac = (float)(RSSI_MAX - rssi) / (RSSI_MAX - RSSI_MIN);
-    gRssiRowY[gRssiRowCount] = MARGIN_TOP + (int)(frac * gPlotH);
-    gRssiRowVal[gRssiRowCount] = rssi;
-    gRssiRowCount++;
+    rssiRowY[rssiRowCount] = plotTop + (int)(frac * (plotBottom - plotTop));
+    rssiRowVal[rssiRowCount] = rssi;
+    rssiRowCount++;
   }
 
-  gToastW = 96;
-  gToastH = 28;
-  gToastX = display.width() - gToastW;
-  gToastY = MARGIN_TOP;
+  // Network list columns, inset from the right edge; SSID takes what's left.
+  colSecX = screenW - 60;
+  colRssiX = screenW - 98;
+  colChX = screenW - 126;
+  listRowsTop = contentY0 + 16;
+  listPagerY = contentY1 - listPagerH;
+  rowsPerPage = (contentH - 16 - listPagerH) / LIST_ROW_H;
+  if (rowsPerPage < 1) rowsPerPage = 1;
 }
 
-// Everything here is drawn exactly once and never touched again: the RSSI
-// axis labels (left margin) and channel numbers (below the plot) live
-// outside every dynamic region, and the status-bar divider sits just above
-// where the status bar's own redraw clears to.
-static void drawStaticChrome() {
-  display.fillScreen(TFT_BLACK); // the only full-screen clear, ever
-  display.drawFastHLine(0, STATUS_BAR_H - 1, display.width(), COLOR_DARKGREY);
+// --- Status bar (top) -----------------------------------------------------
+static void drawStatusBar() {
+  display.fillRect(0, 0, screenW, STATUS_H, COLOR_SURFACE);
+  display.drawFastHLine(0, STATUS_H - 1, screenW, COLOR_BORDER);
 
   display.setTextSize(1);
-  display.setTextColor(TFT_WHITE);
-  for (int r = 0; r < gRssiRowCount; r++) {
-    display.setCursor(0, gRssiRowY[r] - 3);
-    display.print(gRssiRowVal[r]);
-  }
-  for (int ch = 1; ch <= 13; ch++) {
-    display.setCursor(gChanX[ch] - (ch < 10 ? 3 : 6), gBaseline + 3);
-    display.print(ch);
+  display.setTextColor(COLOR_TEXT_DIM);
+  display.setCursor(6, 7);
+  display.printf("%d network%s", gNetworkCount, gNetworkCount == 1 ? "" : "s");
+
+  unsigned long sec = gUptimeMs / 1000;
+  char timeBuf[9];
+  snprintf(timeBuf, sizeof(timeBuf), "%02lu:%02lu:%02lu", sec / 3600, (sec / 60) % 60, sec % 60);
+  display.setTextDatum(TC_DATUM);
+  display.setTextColor(COLOR_TEXT_DIM);
+  display.drawString(timeBuf, screenW / 2, 7);
+  display.setTextDatum(TL_DATUM);
+
+  if (gBattery.sensorReady) {
+    char battBuf[8];
+    snprintf(battBuf, sizeof(battBuf), "%d%%", gBattery.percent);
+    uint16_t col = gBattery.percent <= 15 ? COLOR_RED : (gBattery.percent <= 40 ? COLOR_AMBER : COLOR_GREEN);
+    display.setTextDatum(TR_DATUM);
+    display.setTextColor(col);
+    display.drawString(battBuf, screenW - 6, 7);
+    display.setTextDatum(TL_DATUM);
   }
 }
 
-// Redraws one channel's vertical strip: gridline ticks (erased and put
-// back every time, which is invisible since they're the same pixels),
-// its occupancy bar, and its scatter dots. Called for all 13 channels
-// every cycle - channels with nothing on them just go black-on-black,
-// so in practice only the columns with real traffic ever visibly blink.
-static void refreshChannelColumn(int ch, const NetworkInfo networks[], int count) {
-  int x = gChanX[ch];
-  int w = COLUMN_HALF_W * 2 + 1;
+// --- Nav bar (bottom): shows which screen is active, purely informational
+// now that there's no touch input to drive it. ---
+static void drawNavBar() {
+  static const char *TAB_LABELS[SCREEN_COUNT] = {"Graph", "Networks", "Packets"};
+  int tabW = screenW / SCREEN_COUNT;
 
-  display.fillRect(x - COLUMN_HALF_W, MARGIN_TOP, w, gPlotH, TFT_BLACK);
-  display.drawFastVLine(x, MARGIN_TOP, gPlotH, COLOR_DARKGREY);
-  for (int r = 0; r < gRssiRowCount; r++) {
-    display.drawFastHLine(x - COLUMN_HALF_W, gRssiRowY[r], w, COLOR_DARKGREY);
+  display.fillRect(0, contentY1, screenW, NAV_H, COLOR_SURFACE);
+  display.drawFastHLine(0, contentY1, screenW, COLOR_BORDER);
+
+  display.setTextSize(1);
+  display.setTextDatum(MC_DATUM);
+  for (int i = 0; i < SCREEN_COUNT; i++) {
+    int x = i * tabW;
+    bool active = (i == activeScreen);
+
+    if (active) {
+      display.fillRect(x, contentY1, tabW, 3, COLOR_ACCENT); // active indicator along the tab's top edge
+    }
+    if (i > 0) {
+      display.drawFastVLine(x, contentY1 + 8, NAV_H - 16, COLOR_BORDER);
+    }
+
+    display.setTextColor(active ? COLOR_ACCENT : COLOR_TEXT_DIM);
+    display.drawString(TAB_LABELS[i], x + tabW / 2, contentY1 + NAV_H / 2 + 2);
+  }
+  display.setTextDatum(TL_DATUM);
+}
+
+// --- Graph screen: channel (x) vs RSSI (y) scatter -------------------
+static void renderGraphScreen() {
+  display.setTextSize(1);
+  display.setTextColor(COLOR_TEXT_DIM);
+  for (int r = 0; r < rssiRowCount; r++) {
+    display.drawFastHLine(plotLeft, rssiRowY[r], plotRight - plotLeft, COLOR_BORDER);
+    display.setCursor(2, rssiRowY[r] - 3);
+    display.print(rssiRowVal[r]);
+  }
+  for (int ch = 1; ch <= 13; ch++) {
+    display.drawFastVLine(chanX[ch], plotTop, plotBottom - plotTop, COLOR_BORDER);
+    int lx = chanX[ch] - (ch < 10 ? 3 : 6);
+    if (lx < plotLeft) lx = plotLeft;
+    display.setCursor(lx, plotBottom + 3);
+    display.print(ch);
   }
 
-  int channelCount = 0;
-  for (int i = 0; i < count; i++) {
-    if (networks[i].channel == ch) channelCount++;
-  }
-  int capped = channelCount > CHANNEL_BAR_CAP ? CHANNEL_BAR_CAP : channelCount;
-  int barMaxH = gPlotH - 4;
-  int barH = (barMaxH * capped) / CHANNEL_BAR_CAP;
-  if (barH > 0) {
-    display.fillRect(x - COLUMN_HALF_W, gBaseline - barH, w, barH, COLOR_NAVY);
-  }
-
-  for (int i = 0; i < count; i++) {
-    const NetworkInfo &n = networks[i];
-    if (n.channel != ch) continue;
+  for (int i = 0; i < gNetworkCount; i++) {
+    const NetworkInfo &n = gNetworks[i];
 
     int32_t rssiClamped = n.rssi;
     if (rssiClamped > RSSI_MAX) rssiClamped = RSSI_MAX;
     if (rssiClamped < RSSI_MIN) rssiClamped = RSSI_MIN;
     float frac = (float)(RSSI_MAX - rssiClamped) / (RSSI_MAX - RSSI_MIN);
-    int y = MARGIN_TOP + (int)(frac * gPlotH);
-    y = constrain(y, MARGIN_TOP + 3, gBaseline - 3); // keep the dot's radius inside this column's redrawn strip
+    int x = chanX[n.channel];
+    int y = plotTop + (int)(frac * (plotBottom - plotTop));
+    y = constrain(y, plotTop + 2, plotBottom - 2);
 
-    display.fillCircle(x, y, 3, n.secured ? TFT_CYAN : TFT_GREEN);
+    uint16_t col = securityColor(n.security);
+    display.fillCircle(x, y, 2, col);
+
+    String label = n.ssid.length() > 4 ? n.ssid.substring(0, 4) : n.ssid;
+    if (label.length() == 0) label = "?";
+    int labelW = label.length() * 6;
+
+    // Prefer the dot's right side; flip to the left if that would run past
+    // the plot's right edge, then clamp both sides so it can never spill
+    // outside the content area no matter how crowded the channel is.
+    int lx = x + 5;
+    if (lx + labelW > plotRight) lx = x - 5 - labelW;
+    if (lx < 2) lx = 2;
+    if (lx + labelW > screenW - 2) lx = screenW - 2 - labelW;
+
+    int ly = y - 7;
+    if (ly < contentY0 + 1) ly = contentY0 + 1;
+    if (ly + 7 > contentY1 - 1) ly = contentY1 - 8;
+
+    display.setTextColor(COLOR_TEXT_DIM);
+    display.setCursor(lx, ly);
+    display.print(label);
   }
 }
 
-static void updateStatusBar(int networkCount, int associationCount,
-                             unsigned long totalAlertCount, unsigned long uptimeMs,
-                             const BatteryStatus &battery) {
-  display.fillRect(0, 0, display.width(), STATUS_BAR_H - 1, TFT_BLACK);
-  unsigned long sec = uptimeMs / 1000;
-  display.setTextSize(1);
-
-  // Left group's width depends on how many digits each count has, so its
-  // end position is computed rather than assumed - that's what lets the
-  // elapsed-time field below slot in right after it with a fixed gap
-  // instead of drifting into the battery field on the right.
-  char leftBuf[40];
-  snprintf(leftBuf, sizeof(leftBuf), "Nets:%-3d Assoc:%-3d Alerts:%-3lu",
-           networkCount, associationCount, totalAlertCount);
-  display.setTextColor(TFT_YELLOW);
-  display.setCursor(2, 2);
-  display.print(leftBuf);
-  int leftEndX = 2 + (int)strlen(leftBuf) * 6; // 6px/char at text size 1
-
-  int rightLimit = display.width() - 2;
-  if (battery.sensorReady) {
-    char battBuf[20];
-    snprintf(battBuf, sizeof(battBuf), "Batt:%d%% %.2fV", battery.percent, battery.voltageV);
-    int battWidth = (int)strlen(battBuf) * 6;
-    int battX = display.width() - battWidth - 2;
-    display.setTextColor(battery.percent <= 15 ? TFT_RED : TFT_YELLOW);
-    display.setCursor(battX, 2);
-    display.print(battBuf);
-    rightLimit = battX - 4; // small gap before the battery field
-  }
-
-  char timeBuf[9];
-  snprintf(timeBuf, sizeof(timeBuf), "%02lu:%02lu:%02lu",
-           sec / 3600, (sec / 60) % 60, sec % 60);
-  int timeWidth = (int)strlen(timeBuf) * 6;
-  int timeX = rightLimit - timeWidth;
-  if (timeX < leftEndX + 4) timeX = leftEndX + 4; // don't collide with the left group if things get tight
-
-  display.setTextColor(TFT_YELLOW);
-  display.setCursor(timeX, 2);
-  display.print(timeBuf);
-}
-
-// Bottom banner: flashes the most recent deauth/disassoc/reauth for as
-// long as it's fresh. This strip is never touched by anything else, so
-// unlike the toast it just needs a plain clear on the way out.
-static void updateAlertBanner(const AlertEvent alerts[], int count, unsigned long uptimeMs) {
-  bool active = count > 0 && (uptimeMs - alerts[0].timestampMs) <= TOAST_WINDOW_MS;
-  if (!active) {
-    if (bannerWasVisible) {
-      display.fillRect(0, gGraphBottom, display.width(), BANNER_H, TFT_BLACK);
+// --- Networks screen: sortable, paged list with security level --------
+static void sortNetworksByRssiDesc(int order[], int count) {
+  for (int i = 0; i < count; i++) order[i] = i;
+  for (int i = 0; i < count - 1; i++) {
+    for (int j = i + 1; j < count; j++) {
+      if (gNetworks[order[j]].rssi > gNetworks[order[i]].rssi) {
+        int tmp = order[i];
+        order[i] = order[j];
+        order[j] = tmp;
+      }
     }
-    bannerWasVisible = false;
+  }
+}
+
+static void renderListScreen() {
+  int headerY = contentY0 + 2;
+  display.setTextSize(1);
+  display.setTextColor(COLOR_TEXT_DIM);
+  display.setCursor(6, headerY);
+  display.print("SSID");
+  display.setCursor(colChX, headerY);
+  display.print("CH");
+  display.setCursor(colRssiX, headerY);
+  display.print("RSSI");
+  display.setCursor(colSecX, headerY);
+  display.print("SECURITY");
+  display.drawFastHLine(4, headerY + 12, screenW - 8, COLOR_BORDER);
+
+  if (gNetworkCount == 0) {
+    display.setTextDatum(MC_DATUM);
+    display.setTextColor(COLOR_TEXT_DIM);
+    display.drawString(gHaveData ? "No networks found yet" : "Waiting for data...",
+                        screenW / 2, contentY0 + contentH / 2);
+    display.setTextDatum(TL_DATUM);
+    gListTotalPages = 1;
     return;
   }
 
-  uint16_t color = TFT_MAGENTA; // REAUTH
-  if (alerts[0].kind == "DEAUTH") color = TFT_RED;
-  else if (alerts[0].kind == "DISASSOC") color = TFT_ORANGE;
+  int order[MAX_NETWORKS];
+  sortNetworksByRssiDesc(order, gNetworkCount);
 
-  display.fillRect(0, gGraphBottom, display.width(), BANNER_H, color);
-  display.setTextSize(1);
-  display.setTextColor(TFT_BLACK);
-  display.setCursor(4, gGraphBottom + (BANNER_H - 8) / 2);
-  display.printf("%s  %s -> %s", alerts[0].kind.c_str(),
-                  shortMac(alerts[0].mac1).c_str(), shortMac(alerts[0].mac2).c_str());
-  bannerWasVisible = true;
-}
+  gListTotalPages = (gNetworkCount + rowsPerPage - 1) / rowsPerPage;
+  if (gListPage >= gListTotalPages) gListPage = gListTotalPages - 1;
+  if (gListPage < 0) gListPage = 0;
 
-static int findFreshestAssociation(const DeviceAssociation associations[], int count) {
-  int newest = -1;
-  for (int i = 0; i < count; i++) {
-    if (newest == -1 || associations[i].lastSeenMs > associations[newest].lastSeenMs) newest = i;
+  int startIdx = gListPage * rowsPerPage;
+  int endIdx = startIdx + rowsPerPage;
+  if (endIdx > gNetworkCount) endIdx = gNetworkCount;
+
+  int rowY = listRowsTop;
+  for (int i = startIdx; i < endIdx; i++) {
+    const NetworkInfo &n = gNetworks[order[i]];
+    if ((i - startIdx) % 2 == 1) {
+      display.fillRect(4, rowY - 2, screenW - 8, LIST_ROW_H, COLOR_SURFACE);
+    }
+
+    display.setTextColor(COLOR_TEXT);
+    display.setCursor(6, rowY);
+    display.print(truncated(n.ssid.length() == 0 ? String("<hidden>") : n.ssid, 18));
+
+    display.setCursor(colChX, rowY);
+    display.printf("%2u", n.channel);
+
+    display.setCursor(colRssiX, rowY);
+    display.printf("%4ld", (long)n.rssi);
+
+    display.setTextColor(securityColor(n.security));
+    display.setCursor(colSecX, rowY);
+    display.print(securityLabel(n.security));
+
+    rowY += LIST_ROW_H;
   }
-  return newest;
+
+  // Pages advance automatically (see updateActiveScreen()) - no on-screen
+  // controls needed, just a plain indicator of where we are.
+  char pageBuf[16];
+  snprintf(pageBuf, sizeof(pageBuf), "Page %d / %d", gListPage + 1, gListTotalPages);
+  display.setTextDatum(MC_DATUM);
+  display.setTextColor(COLOR_TEXT_DIM);
+  display.drawString(pageBuf, screenW / 2, listPagerY + listPagerH / 2);
+  display.setTextDatum(TL_DATUM);
 }
 
-static void drawJoinToast(const String &ssid) {
-  display.fillRect(gToastX, gToastY, gToastW, gToastH, TFT_BLACK);
-  display.drawRect(gToastX, gToastY, gToastW, gToastH, TFT_GREEN);
+// --- Packets screen: filtered feed of interesting frames, newest first ---
+static void renderPacketsScreen() {
+  if (gPacketCount == 0) {
+    display.setTextDatum(MC_DATUM);
+    display.setTextColor(COLOR_TEXT_DIM);
+    display.drawString(gHaveData ? "No activity yet" : "Waiting for data...",
+                        screenW / 2, contentY0 + contentH / 2);
+    display.setTextDatum(TL_DATUM);
+    return;
+  }
+
+  int maxRows = contentH / PACKET_ROW_H;
+  int shown = gPacketCount < maxRows ? gPacketCount : maxRows;
+
   display.setTextSize(1);
-  display.setTextColor(TFT_GREEN);
-  display.setCursor(gToastX + 3, gToastY + 3);
-  display.print("+ JOINED");
-  display.setTextColor(TFT_WHITE);
-  display.setCursor(gToastX + 3, gToastY + 14);
-  display.print(truncated(ssid, 15));
+  int rowY = contentY0 + 4;
+  for (int i = 0; i < shown; i++) {
+    const PacketEvent &p = gPackets[i]; // already newest-first from getRecentPackets()
+
+    unsigned long ageSec = (gUptimeMs >= p.timestampMs) ? (gUptimeMs - p.timestampMs) / 1000 : 0;
+    char ageBuf[6];
+    if (ageSec < 60) snprintf(ageBuf, sizeof(ageBuf), "%2lus", ageSec);
+    else snprintf(ageBuf, sizeof(ageBuf), "%2lum", ageSec / 60);
+
+    display.setTextColor(COLOR_TEXT_DIM);
+    display.setCursor(4, rowY);
+    display.print(ageBuf);
+
+    display.setTextColor(packetColor(p.kind));
+    display.setCursor(34, rowY);
+    display.print(packetKindLabel(p.kind));
+
+    String line = shortMac(p.mac);
+    if (p.detail.length() > 0) {
+      line += "  ";
+      line += p.detail;
+    }
+    display.setTextColor(COLOR_TEXT);
+    display.setCursor(102, rowY);
+    display.print(truncated(line, 34));
+
+    rowY += PACKET_ROW_H;
+  }
 }
 
+static void renderContent() {
+  display.fillRect(0, contentY0, screenW, contentH, COLOR_BG);
+  switch (activeScreen) {
+    case SCREEN_GRAPH: renderGraphScreen(); break;
+    case SCREEN_LIST: renderListScreen(); break;
+    case SCREEN_PACKETS: renderPacketsScreen(); break;
+  }
+}
+
+// Advances to the next screen every ROTATE_INTERVAL_MS. Stepping onto the
+// list screen also advances its page, so a network list too long for one
+// page is still fully visible over time instead of only ever showing page 1.
+static void updateActiveScreen() {
+  unsigned long now = millis();
+  if (now - lastRotateMs < ROTATE_INTERVAL_MS) return;
+  lastRotateMs = now;
+
+  activeScreen = (activeScreen + 1) % SCREEN_COUNT;
+  if (activeScreen == SCREEN_LIST) {
+    gListPage = (gListPage + 1) % (gListTotalPages > 0 ? gListTotalPages : 1);
+  }
+}
+
+// --- Public API -----------------------------------------------------------
 void screenInit() {
   display.init(); // dimensions/pins/SPI frequency come from platformio.ini build_flags
   display.invertDisplay(false); // this clone's init() defaults to inverted colors
   tftReady = true; // this library has no way to report a failed init over SPI
 
   display.setRotation(1); // landscape, 320x240 (try 3 instead if upside-down on your panel)
+  initPalette();
   layoutInit();
-  drawStaticChrome();
+  lastRotateMs = millis();
 
+  display.fillScreen(COLOR_BG);
+  display.setTextDatum(MC_DATUM);
+  display.setTextColor(COLOR_TEXT);
+  display.setTextSize(2);
+  display.drawString("WiFi Scanner", screenW / 2, screenH / 2 - 20);
   display.setTextSize(1);
-  display.setTextColor(TFT_WHITE);
-  display.setCursor(2, 2);
-  display.print("booting..."); // lives in the status bar's own footprint, so the first real update below overwrites it for free
+  display.setTextColor(COLOR_TEXT_DIM);
+  display.drawString("booting...", screenW / 2, screenH / 2 + 12);
+  display.setTextDatum(TL_DATUM);
+
+  drawStatusBar();
+  drawNavBar();
+  renderContent();
 }
 
-void screenRenderNextPage(const NetworkInfo networks[], int networkCount,
-                           const DeviceAssociation associations[], int associationCount,
-                           const AlertEvent alerts[], int alertCount,
-                           unsigned long totalAlertCount, unsigned long uptimeMs,
-                           const BatteryStatus &battery) {
+void screenRender(const NetworkInfo networks[], int networkCount,
+                   const DeviceAssociation associations[], int associationCount,
+                   const AlertEvent alerts[], int alertCount,
+                   const PacketEvent packets[], int packetCount,
+                   unsigned long totalAlertCount, unsigned long uptimeMs,
+                   const BatteryStatus &battery) {
   if (!tftReady) return;
 
-  int freshest = findFreshestAssociation(associations, associationCount);
-  bool showToast = freshest != -1 && (uptimeMs - associations[freshest].lastSeenMs) <= TOAST_WINDOW_MS;
+  // Associations/alerts aren't shown on any screen yet - kept in the
+  // shared interface for the OLED backend and for a future alerts screen.
+  (void)associations; (void)associationCount; (void)alerts; (void)alertCount; (void)totalAlertCount;
 
-  // The toast floats over the right edge of the channel graph, including
-  // the gaps *between* columns that refreshChannelColumn() never touches.
-  // On the frame it fades out, wipe its whole footprint first so those
-  // gaps go back to black - the column loop right after repaints the
-  // tile portions on top of that, leaving a clean result either way.
-  if (!showToast && toastWasVisible) {
-    display.fillRect(gToastX, gToastY, gToastW, gToastH, TFT_BLACK);
+  bool firstData = !gHaveData; // so the initial "Waiting for data..." placeholder doesn't linger until the first rotation
+
+  for (int i = 0; i < networkCount; i++) gNetworks[i] = networks[i];
+  gNetworkCount = networkCount;
+  for (int i = 0; i < packetCount; i++) gPackets[i] = packets[i];
+  gPacketCount = packetCount;
+  gUptimeMs = uptimeMs;
+  gBattery = battery;
+  gHaveData = true;
+
+  uint8_t screenBefore = activeScreen;
+  updateActiveScreen();
+
+  drawStatusBar(); // small and cheap - fine to refresh every cycle
+
+  // The content area's full black clear is slow enough over this panel's
+  // conservative SPI speed to read as a flicker, and the data doesn't
+  // change fast enough to need refreshing every cycle anyway - only
+  // redraw it when the screen actually changes.
+  if (activeScreen != screenBefore) {
+    drawNavBar();
+    renderContent();
+  } else if (firstData) {
+    renderContent();
   }
-
-  for (int ch = 1; ch <= 13; ch++) {
-    refreshChannelColumn(ch, networks, networkCount);
-  }
-
-  updateStatusBar(networkCount, associationCount, totalAlertCount, uptimeMs, battery);
-  updateAlertBanner(alerts, alertCount, uptimeMs);
-
-  if (showToast) drawJoinToast(associations[freshest].ssid);
-  toastWasVisible = showToast;
 }
 
 #endif // USE_TFT_DISPLAY

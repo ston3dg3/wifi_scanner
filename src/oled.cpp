@@ -126,12 +126,14 @@ void screenInit() {
   display.display();
 }
 
-void screenRenderNextPage(const NetworkInfo networks[], int networkCount,
-                           const DeviceAssociation associations[], int associationCount,
-                           const AlertEvent alerts[], int alertCount,
-                           unsigned long totalAlertCount, unsigned long uptimeMs,
-                           const BatteryStatus &battery) {
+void screenRender(const NetworkInfo networks[], int networkCount,
+                   const DeviceAssociation associations[], int associationCount,
+                   const AlertEvent alerts[], int alertCount,
+                   const PacketEvent packets[], int packetCount,
+                   unsigned long totalAlertCount, unsigned long uptimeMs,
+                   const BatteryStatus &battery) {
   if (!oledReady) return;
+  (void)packets; (void)packetCount; // no packet feed page on this backend
 
   display.clearDisplay();
   switch (currentPage) {

@@ -13,6 +13,7 @@
 static NetworkInfo networks[MAX_NETWORKS];
 static DeviceAssociation associations[MAX_ASSOCIATIONS];
 static AlertEvent alerts[MAX_ALERTS];
+static PacketEvent packets[MAX_PACKET_LOG];
 
 // Serial commands:
 //   beacon - broadcast a fake AP for 5s (see network.cpp)
@@ -49,12 +50,14 @@ void loop() {
   int networkCount = getNetworks(networks, MAX_NETWORKS);
   int associationCount = getAssociations(associations, MAX_ASSOCIATIONS);
   int alertCount = getRecentAlerts(alerts, MAX_ALERTS);
+  int packetCount = getRecentPackets(packets, MAX_PACKET_LOG);
   BatteryStatus battery = batteryRead();
 
   sendStateOverSerial(networks, networkCount, associations, associationCount,
                        alerts, alertCount, getTotalAlertCount(), millis(), battery);
-  screenRenderNextPage(networks, networkCount, associations, associationCount,
-                        alerts, alertCount, getTotalAlertCount(), millis(), battery);
+  screenRender(networks, networkCount, associations, associationCount,
+               alerts, alertCount, packets, packetCount,
+               getTotalAlertCount(), millis(), battery);
 
   ledOn = !ledOn;
   digitalWrite(LED, ledOn ? LOW : HIGH); // active-LOW heartbeat blink

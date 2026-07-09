@@ -72,6 +72,15 @@ DC was moved - the board's own RST pin works fine.)
 
 ### If your module also has an SD card slot and/or touch controller
 
+> **This project's specific panel has no touch controller populated.**
+> Every SPI-side connection (`T_CLK`/`T_DIN`/`T_DO`/`T_CS`) checked out
+> with a continuity meter, `T_CS` was confirmed toggling correctly (and
+> tested forced permanently low), yet `T_IRQ` sits flat at 0V regardless
+> of touch - the XPT2046 chip itself simply isn't on the board. The
+> firmware doesn't attempt touch input; screens rotate on a timer
+> instead. The wiring below is left for reference in case a touch-capable
+> panel gets swapped in later.
+
 Common on these 2.4" boards - the SD card and resistive touch controller
 (typically an XPT2046) share the same SPI bus (SCK/MOSI/MISO) as the LCD,
 each gated by its own chip-select pin. If their CS pins are left floating
