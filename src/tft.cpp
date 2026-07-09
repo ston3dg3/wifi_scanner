@@ -3,25 +3,18 @@
 #if USE_TFT_DISPLAY // this backend is inactive - compiles to nothing
 
 #include "screen.h"
-#include <SPI.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_ST7789.h>
+#include <TFT_eSPI.h>
 
 // This module is sold/labeled as "ILI9341" but is actually a mislabeled
 // ST7789 clone - confirmed by bring-up testing (the ILI9341 driver only
 // ever addressed part of the panel, ST7789 covers it correctly). See
 // docs/wiring.md.
+//
+// Driver choice, pins, and SPI frequency are all set via build_flags in
+// platformio.ini (TFT_eSPI is configured at compile time, not via
+// constructor args) - see the comment block there for the pin mapping.
 
-// Hardware SPI (SCK=D5, MOSI=D7 on NodeMCU).
-#define TFT_CS D8
-#define TFT_DC D3  // NOT D6/GPIO12 - SPI.begin() claims that as hardware MISO; this was the actual root cause of prior "half-screen" bugs
-#define TFT_RST -1 // shared with the board's own RST pin - no dedicated GPIO needed once DC is wired correctly
-
-// Conservative for jumper-wire signal integrity - raise once confirmed
-// reliable (try 8000000, then 20000000).
-#define TFT_SPI_HZ 1000000UL
-
-#define COLOR_DARKGREY 0x7BEF // ST77XX headers don't define a grey constant
+#define COLOR_DARKGREY 0x7BEF // matches TFT_DARKGREY, spelled out for clarity
 #define COLOR_NAVY 0x000C     // dim fill for the per-channel occupancy bars
 
 // RSSI range for the channel/signal graph, in dBm.
@@ -49,7 +42,7 @@
 #define MARGIN_BOTTOM 12
 #define COLUMN_HALF_W 5 // each channel's dynamic content lives in a x-5..x+5 strip
 
-static Adafruit_ST7789 display(TFT_CS, TFT_DC, TFT_RST);
+static TFT_eSPI display = TFT_eSPI();
 static bool tftReady = false;
 
 // Layout, computed once in screenInit() from the panel's actual dimensions.
@@ -102,11 +95,11 @@ static void layoutInit() {
 // outside every dynamic region, and the status-bar divider sits just above
 // where the status bar's own redraw clears to.
 static void drawStaticChrome() {
-  display.fillScreen(ST77XX_BLACK); // the only full-screen clear, ever
+  display.fillScreen(TFT_BLACK); // the only full-screen clear, ever
   display.drawFastHLine(0, STATUS_BAR_H - 1, display.width(), COLOR_DARKGREY);
 
   display.setTextSize(1);
-  display.setTextColor(ST77XX_WHITE);
+  display.setTextColor(TFT_WHITE);
   for (int r = 0; r < gRssiRowCount; r++) {
     display.setCursor(0, gRssiRowY[r] - 3);
     display.print(gRssiRowVal[r]);
@@ -126,7 +119,7 @@ static void refreshChannelColumn(int ch, const NetworkInfo networks[], int count
   int x = gChanX[ch];
   int w = COLUMN_HALF_W * 2 + 1;
 
-  display.fillRect(x - COLUMN_HALF_W, MARGIN_TOP, w, gPlotH, ST77XX_BLACK);
+  display.fillRect(x - COLUMN_HALF_W, MARGIN_TOP, w, gPlotH, TFT_BLACK);
   display.drawFastVLine(x, MARGIN_TOP, gPlotH, COLOR_DARKGREY);
   for (int r = 0; r < gRssiRowCount; r++) {
     display.drawFastHLine(x - COLUMN_HALF_W, gRssiRowY[r], w, COLOR_DARKGREY);
@@ -154,30 +147,51 @@ static void refreshChannelColumn(int ch, const NetworkInfo networks[], int count
     int y = MARGIN_TOP + (int)(frac * gPlotH);
     y = constrain(y, MARGIN_TOP + 3, gBaseline - 3); // keep the dot's radius inside this column's redrawn strip
 
-    display.fillCircle(x, y, 3, n.secured ? ST77XX_CYAN : ST77XX_GREEN);
+    display.fillCircle(x, y, 3, n.secured ? TFT_CYAN : TFT_GREEN);
   }
 }
 
 static void updateStatusBar(int networkCount, int associationCount,
                              unsigned long totalAlertCount, unsigned long uptimeMs,
                              const BatteryStatus &battery) {
-  display.fillRect(0, 0, display.width(), STATUS_BAR_H - 1, ST77XX_BLACK);
+  display.fillRect(0, 0, display.width(), STATUS_BAR_H - 1, TFT_BLACK);
   unsigned long sec = uptimeMs / 1000;
   display.setTextSize(1);
-  display.setTextColor(ST77XX_YELLOW);
-  display.setCursor(2, 2);
-  display.printf("Nets:%-3d Assoc:%-3d Alerts:%-4lu  %02lu:%02lu:%02lu",
-                  networkCount, associationCount, totalAlertCount,
-                  sec / 3600, (sec / 60) % 60, sec % 60);
 
+  // Left group's width depends on how many digits each count has, so its
+  // end position is computed rather than assumed - that's what lets the
+  // elapsed-time field below slot in right after it with a fixed gap
+  // instead of drifting into the battery field on the right.
+  char leftBuf[40];
+  snprintf(leftBuf, sizeof(leftBuf), "Nets:%-3d Assoc:%-3d Alerts:%-3lu",
+           networkCount, associationCount, totalAlertCount);
+  display.setTextColor(TFT_YELLOW);
+  display.setCursor(2, 2);
+  display.print(leftBuf);
+  int leftEndX = 2 + (int)strlen(leftBuf) * 6; // 6px/char at text size 1
+
+  int rightLimit = display.width() - 2;
   if (battery.sensorReady) {
-    char buf[20];
-    snprintf(buf, sizeof(buf), "Batt:%d%% %.2fV", battery.percent, battery.voltageV);
-    int textWidth = strlen(buf) * 6; // 6px/char at text size 1
-    display.setTextColor(battery.percent <= 15 ? ST77XX_RED : ST77XX_YELLOW);
-    display.setCursor(display.width() - textWidth - 2, 2);
-    display.print(buf);
+    char battBuf[20];
+    snprintf(battBuf, sizeof(battBuf), "Batt:%d%% %.2fV", battery.percent, battery.voltageV);
+    int battWidth = (int)strlen(battBuf) * 6;
+    int battX = display.width() - battWidth - 2;
+    display.setTextColor(battery.percent <= 15 ? TFT_RED : TFT_YELLOW);
+    display.setCursor(battX, 2);
+    display.print(battBuf);
+    rightLimit = battX - 4; // small gap before the battery field
   }
+
+  char timeBuf[9];
+  snprintf(timeBuf, sizeof(timeBuf), "%02lu:%02lu:%02lu",
+           sec / 3600, (sec / 60) % 60, sec % 60);
+  int timeWidth = (int)strlen(timeBuf) * 6;
+  int timeX = rightLimit - timeWidth;
+  if (timeX < leftEndX + 4) timeX = leftEndX + 4; // don't collide with the left group if things get tight
+
+  display.setTextColor(TFT_YELLOW);
+  display.setCursor(timeX, 2);
+  display.print(timeBuf);
 }
 
 // Bottom banner: flashes the most recent deauth/disassoc/reauth for as
@@ -187,19 +201,19 @@ static void updateAlertBanner(const AlertEvent alerts[], int count, unsigned lon
   bool active = count > 0 && (uptimeMs - alerts[0].timestampMs) <= TOAST_WINDOW_MS;
   if (!active) {
     if (bannerWasVisible) {
-      display.fillRect(0, gGraphBottom, display.width(), BANNER_H, ST77XX_BLACK);
+      display.fillRect(0, gGraphBottom, display.width(), BANNER_H, TFT_BLACK);
     }
     bannerWasVisible = false;
     return;
   }
 
-  uint16_t color = ST77XX_MAGENTA; // REAUTH
-  if (alerts[0].kind == "DEAUTH") color = ST77XX_RED;
-  else if (alerts[0].kind == "DISASSOC") color = ST77XX_ORANGE;
+  uint16_t color = TFT_MAGENTA; // REAUTH
+  if (alerts[0].kind == "DEAUTH") color = TFT_RED;
+  else if (alerts[0].kind == "DISASSOC") color = TFT_ORANGE;
 
   display.fillRect(0, gGraphBottom, display.width(), BANNER_H, color);
   display.setTextSize(1);
-  display.setTextColor(ST77XX_BLACK);
+  display.setTextColor(TFT_BLACK);
   display.setCursor(4, gGraphBottom + (BANNER_H - 8) / 2);
   display.printf("%s  %s -> %s", alerts[0].kind.c_str(),
                   shortMac(alerts[0].mac1).c_str(), shortMac(alerts[0].mac2).c_str());
@@ -215,22 +229,20 @@ static int findFreshestAssociation(const DeviceAssociation associations[], int c
 }
 
 static void drawJoinToast(const String &ssid) {
-  display.fillRect(gToastX, gToastY, gToastW, gToastH, ST77XX_BLACK);
-  display.drawRect(gToastX, gToastY, gToastW, gToastH, ST77XX_GREEN);
+  display.fillRect(gToastX, gToastY, gToastW, gToastH, TFT_BLACK);
+  display.drawRect(gToastX, gToastY, gToastW, gToastH, TFT_GREEN);
   display.setTextSize(1);
-  display.setTextColor(ST77XX_GREEN);
+  display.setTextColor(TFT_GREEN);
   display.setCursor(gToastX + 3, gToastY + 3);
   display.print("+ JOINED");
-  display.setTextColor(ST77XX_WHITE);
+  display.setTextColor(TFT_WHITE);
   display.setCursor(gToastX + 3, gToastY + 14);
   display.print(truncated(ssid, 15));
 }
 
 void screenInit() {
-  SPI.begin();
-  display.init(240, 320); // ST7789 needs explicit dimensions - GRAM size varies by module
+  display.init(); // dimensions/pins/SPI frequency come from platformio.ini build_flags
   display.invertDisplay(false); // this clone's init() defaults to inverted colors
-  display.setSPISpeed(TFT_SPI_HZ);
   tftReady = true; // this library has no way to report a failed init over SPI
 
   display.setRotation(1); // landscape, 320x240 (try 3 instead if upside-down on your panel)
@@ -238,7 +250,7 @@ void screenInit() {
   drawStaticChrome();
 
   display.setTextSize(1);
-  display.setTextColor(ST77XX_WHITE);
+  display.setTextColor(TFT_WHITE);
   display.setCursor(2, 2);
   display.print("booting..."); // lives in the status bar's own footprint, so the first real update below overwrites it for free
 }
@@ -259,7 +271,7 @@ void screenRenderNextPage(const NetworkInfo networks[], int networkCount,
   // gaps go back to black - the column loop right after repaints the
   // tile portions on top of that, leaving a clean result either way.
   if (!showToast && toastWasVisible) {
-    display.fillRect(gToastX, gToastY, gToastW, gToastH, ST77XX_BLACK);
+    display.fillRect(gToastX, gToastY, gToastW, gToastH, TFT_BLACK);
   }
 
   for (int ch = 1; ch <= 13; ch++) {
